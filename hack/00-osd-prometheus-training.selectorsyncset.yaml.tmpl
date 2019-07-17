@@ -1,0 +1,166 @@
+apiVersion: v1
+kind: Template
+metadata:
+  name: selectorsyncset-template
+objects:
+- apiVersion: hive.openshift.io/v1alpha1
+  kind: SelectorSyncSet
+  metadata:
+    labels:
+      managed.openshift.io/gitHash: ${IMAGE_TAG}
+      managed.openshift.io/gitRepoName: ${REPO_NAME}
+      managed.openshift.io/osd: 'true'
+    name: prometheus-training
+  spec:
+    clusterDeploymentSelector:
+      matchLabels:
+        api.openshift.com/managed: 'true'
+    resourceApplyMode: sync
+    resources:
+    - apiVersion: v1
+      kind: ServiceAccount
+      metadata:
+        name: sre-logged-in-users
+        namespace: openshift-monitoring
+    - apiVersion: apps/v1
+      kind: DaemonSet
+      metadata:
+        labels:
+          name: sre-logged-in-users
+        name: sre-logged-in-users
+        namespace: openshift-monitoring
+      spec:
+        selector:
+          matchLabels:
+            name: sre-logged-in-users
+        template:
+          metadata:
+            labels:
+              name: sre-logged-in-users
+            name: sre-logged-in-users
+          spec:
+            containers:
+            - command:
+              - /bin/sh
+              - /monitor/start.sh
+              env:
+              - name: PYTHONPATH
+                value: /openshift-python/packages:/support/packages
+              image: quay.io/openshift-sre/managed-prometheus-exporter-base:0.1.3-5a0899dd
+              imagePullPolicy: IfNotPresent
+              livenessProbe:
+                failureThreshold: 2
+                httpGet:
+                  path: /
+                  port: 8080
+                initialDelaySeconds: 420
+                periodSeconds: 360
+                timeoutSeconds: 240
+              name: main
+              ports:
+              - containerPort: 8080
+                protocol: TCP
+              readinessProbe:
+                httpGet:
+                  path: /
+                  port: 8080
+                initialDelaySeconds: 3
+                timeoutSeconds: 240
+              volumeMounts:
+              - mountPath: /monitor
+                name: monitor-volume
+                readOnly: true
+              workingDir: /monitor
+            dnsPolicy: ClusterFirst
+            restartPolicy: Always
+            serviceAccountName: sre-logged-in-users
+            volumes:
+            - configMap:
+                name: sre-logged-in-users-code
+              name: monitor-volume
+    - apiVersion: monitoring.coreos.com/v1
+      kind: ServiceMonitor
+      metadata:
+        labels:
+          k8s-app: sre-logged-in-users
+          name: sre-logged-in-users
+        name: sre-logged-in-users
+        namespace: openshift-monitoring
+      spec:
+        endpoints:
+        - honorLabels: true
+          interval: 2m
+          port: http-main
+          scheme: http
+          scrapeTimeout: 2m
+          targetPort: 0
+        jobLabel: sre-logged-in-users
+        namespaceSelector: {}
+        selector:
+          matchLabels:
+            name: sre-logged-in-users
+    - apiVersion: v1
+      data:
+        main.py: "#!/usr/bin/env python\n\nfrom sets import Set\n\nimport logging\nimport
+          os\nimport time\nimport platform\nimport psutil\n\nfrom prometheus_client
+          import start_http_server, Gauge\n\nLOGGED_IN_USERS = Gauge('logged_in_users',\"Number
+          of logged in users\", labelnames=['hostname', 'username'])\n\n# A list (implemented
+          as a Set) of all active Users\nACTIVE_USERS = Set([])\n\ndef collect():\n
+          \   # Build up the histogram for logged in users\n    seen_users = {}\n
+          \   for user in psutil.users():\n        if user.name not in seen_users:\n
+          \           seen_users[user.name] = 1\n        else:\n            seen_users[user.name]
+          += 1\n        \n        ACTIVE_USERS.add(user.name)\n\n    # Add users to
+          exported data list\n    for user, count in seen_users.iteritems():\n        LOGGED_IN_USERS.labels(\n
+          \           hostname = platform.node(),\n            username = user\n        ).set(count)\n\n
+          \   # Delete people from Prometheus who are no longer logged in\n    # This
+          avoids stale data in 'LOGGED_IN_USERS'\n    for inactive_user in ACTIVE_USERS
+          - Set(seen_users.keys()):\n        logging.info(\"Removing username='%s'
+          from Prometheus \",inactive_user)\n        ACTIVE_USERS.remove(inactive_user)\n
+          \       LOGGED_IN_USERS.remove(platform.node(),inactive_user)\n\nif __name__
+          == \"__main__\":\n    logging.basicConfig(level=logging.INFO, format='%(asctime)s
+          %(levelname)s:%(name)s:%(message)s')\n\n    logging.info(\"Starting exporter\")\n
+          \   start_http_server(8081)\n    while True:\n        collect()\n        time.sleep(1)\n"
+        start.sh: "#!/bin/sh\n\nset -o allexport\n\nif [[ -d /config && -d /config/env
+          ]]; then\n  source /config/env/*\nfi\n\nexec /usr/bin/python /monitor/main.py
+          \"$@\""
+      kind: ConfigMap
+      metadata:
+        creationTimestamp: null
+        name: sre-logged-in-users-code
+        namespace: openshift-monitoring
+    - apiVersion: v1
+      kind: Service
+      metadata:
+        labels:
+          name: sre-logged-in-users
+        name: sre-logged-in-users
+        namespace: openshift-monitoring
+      spec:
+        ports:
+        - name: http-main
+          port: 80
+          protocol: TCP
+          targetPort: 8080
+        selector:
+          name: sre-logged-in-users
+        sessionAffinity: None
+        type: ClusterIP
+    - apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: sre-logged-in-users
+        namespace: openshift-monitoring
+      roleRef:
+        apiGroup: rbac.authorization.k8s.io
+        kind: ClusterRole
+        name: edit
+      subjects:
+      - kind: ServiceAccount
+        name: sre-logged-in-users
+        namespace: openshift-monitoring
+parameters:
+- name: IMAGE_TAG
+  required: true
+- name: REPO_NAME
+  required: true
+  value: prometheus-training
